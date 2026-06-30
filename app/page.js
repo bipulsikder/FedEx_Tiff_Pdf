@@ -1,0 +1,461 @@
+'use client'
+
+import { useState, useRef, useEffect } from 'react'
+import { supabase } from '../lib/supabase'
+import { useRouter } from 'next/navigation'
+
+export default function Home() {
+  const [selectedFiles, setSelectedFiles] = useState([])
+  const [sourceName, setSourceName] = useState('')
+  const [converting, setConverting] = useState(false)
+  const [convertedFiles, setConvertedFiles] = useState([])
+  const [status, setStatus] = useState('')
+  const [progress, setProgress] = useState(0)
+  const [errorMessage, setErrorMessage] = useState('')
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const fileInputRef = useRef(null)
+  const folderInputRef = useRef(null)
+  const router = useRouter()
+
+  useEffect(() => {
+    // First check for existing session
+    const init = async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session?.user) {
+        setUser(session.user)
+      }
+      setLoading(false)
+    }
+    init()
+
+    // Listen for auth state changes
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session?.user) {
+        setUser(session.user)
+      } else {
+        setUser(null)
+      }
+      setLoading(false)
+    })
+
+    return () => {
+      authListener?.subscription?.unsubscribe()
+    }
+  }, [])
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    router.push('/login')
+  }
+
+  const trackConversion = async (count) => {
+    try {
+      await supabase
+        .from('conversions')
+        .insert({ user_id: user.id, files_converted: count })
+    } catch (error) {
+      console.error('Error tracking conversion:', error)
+    }
+  }
+
+  const processFiles = async (files) => {
+    setConverting(true)
+    setStatus('Starting conversion...')
+    setProgress(0)
+    setErrorMessage('')
+    const converted = []
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        setStatus(`Converting ${i + 1}/${files.length}: ${file.name}`)
+        setProgress(Math.round(((i + 1) / files.length) * 100))
+
+        const formData = new FormData()
+        formData.append('file', file)
+
+        const res = await fetch('/api/convert', {
+          method: 'POST',
+          body: formData,
+        })
+
+        if (!res.ok) throw new Error(`Conversion failed for ${file.name}`)
+
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        const pdfName = file.name.replace(/\.(tiff|tif)$/i, '.pdf')
+
+        converted.push({ name: pdfName, url, blob })
+      }
+
+      setConvertedFiles(converted)
+      setStatus('All conversions complete!')
+      setProgress(100)
+      
+      await trackConversion(files.length)
+
+      if (files.length === 1) {
+        setStatus('Downloading PDF...')
+        downloadIndividual(converted[0])
+      } else {
+        setStatus('Downloading ZIP...')
+        await downloadAllAsZip(converted)
+      }
+    } catch (error) {
+      console.error(error)
+      setErrorMessage(`Error converting files: ${error.message}`)
+    } finally {
+      setConverting(false)
+    }
+  }
+
+  const handleUnifiedSelect = async (e) => {
+    const files = Array.from(e.target.files)
+    setSelectedFiles([])
+    setConvertedFiles([])
+    setStatus('')
+    setErrorMessage('')
+    setSourceName('')
+
+    const tiffFiles = []
+    const zipFiles = []
+    let detectedSourceName = ''
+
+    for (const file of files) {
+      if (file.name.toLowerCase().endsWith('.zip')) {
+        zipFiles.push(file)
+        if (!detectedSourceName) {
+          detectedSourceName = file.name.replace(/\.zip$/i, '')
+        }
+      } else if (file.name.toLowerCase().endsWith('.tiff') || file.name.toLowerCase().endsWith('.tif')) {
+        tiffFiles.push(file)
+        if (!detectedSourceName && file.webkitRelativePath) {
+          const pathParts = file.webkitRelativePath.split('/')
+          if (pathParts.length > 1) {
+            detectedSourceName = pathParts[0]
+          }
+        }
+      }
+    }
+
+    if (zipFiles.length > 0) {
+      for (const zipFile of zipFiles) {
+        try {
+          const JSZip = (await import('jszip')).default
+          const zip = await JSZip.loadAsync(zipFile)
+          let foundInZip = false
+
+          for (const [path, zipEntry] of Object.entries(zip.files)) {
+            if (!zipEntry.dir && (path.toLowerCase().endsWith('.tiff') || path.toLowerCase().endsWith('.tif'))) {
+              const blob = await zipEntry.async('blob')
+              const fileName = path.split('/').pop()
+              const tiffFile = new File([blob], fileName, { type: 'image/tiff' })
+              tiffFiles.push(tiffFile)
+              foundInZip = true
+            }
+          }
+
+          if (!foundInZip) {
+            setErrorMessage(`No TIFF files found in ${zipFile.name}`)
+          }
+        } catch (error) {
+          console.error(error)
+          setErrorMessage(`Error reading ${zipFile.name}: ${error.message}`)
+        }
+      }
+    }
+
+    if (tiffFiles.length === 0 && zipFiles.length === 0) {
+      setErrorMessage('No TIFF or ZIP files found in selection')
+      setSelectedFiles([])
+    } else if (tiffFiles.length === 0) {
+      setSelectedFiles([])
+    } else {
+      setSelectedFiles(tiffFiles)
+      setSourceName(detectedSourceName || 'converted')
+      setErrorMessage('')
+    }
+  }
+
+  const downloadAllAsZip = async (files = convertedFiles) => {
+    const JSZip = (await import('jszip')).default
+    const zip = new JSZip()
+
+    for (const file of files) {
+      zip.file(file.name, file.blob)
+    }
+
+    const blob = await zip.generateAsync({ type: 'blob' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${sourceName}_PDFs.zip`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const downloadIndividual = (file) => {
+    const a = document.createElement('a')
+    a.href = file.url
+    a.download = file.name
+    a.click()
+  }
+
+  const startConversion = () => {
+    if (selectedFiles.length === 0) {
+      setErrorMessage('Please select some TIFF files first!')
+      return
+    }
+    processFiles(selectedFiles)
+  }
+
+  const reset = () => {
+    setSelectedFiles([])
+    setSourceName('')
+    setConvertedFiles([])
+    setStatus('')
+    setProgress(0)
+    setErrorMessage('')
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    if (folderInputRef.current) folderInputRef.current.value = ''
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-4 border-purple-600 border-t-transparent mx-auto mb-4"></div>
+          <p className="text-xl text-slate-700">Loading...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) {
+    router.push('/login')
+    return null
+  }
+
+  return (
+    <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+      <header className="bg-gradient-to-r from-purple-900 via-purple-800 to-indigo-900 text-white shadow-xl">
+        <div className="max-w-7xl mx-auto px-6 py-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <img 
+                src="https://www.fedex.com/content/dam/fedex-com/logos/logo.png" 
+                alt="FedEx Logo" 
+                className="h-10 md:h-12 object-contain" 
+              />
+              <div>
+                <h1 className="text-2xl md:text-3xl font-bold tracking-tight">TIFF to PDF Converter</h1>
+                <p className="text-purple-200 mt-1 text-sm">Fast, reliable conversion</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              {user.email === 'admin@fedex.com' && (
+                <button
+                  onClick={() => router.push('/admin')}
+                  className="px-4 py-2 bg-white/20 border border-white/30 rounded-xl font-semibold hover:bg-white/30 transition-all"
+                >
+                  Admin Dashboard
+                </button>
+              )}
+              <button
+                onClick={handleLogout}
+                className="px-4 py-2 bg-red-500 rounded-xl font-semibold hover:bg-red-600 transition-all"
+              >
+                Logout
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div className="max-w-5xl mx-auto px-6 py-10">
+        <div className="bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden">
+          <div className="bg-gradient-to-r from-slate-50 to-slate-100 px-8 py-5 border-b border-slate-200">
+            <h2 className="text-xl font-bold text-slate-800">Upload Files</h2>
+            <p className="text-slate-500 mt-1 text-sm">Select TIFF files, folders, or ZIP files with TIFFs</p>
+          </div>
+          
+          <div className="p-8">
+            <div className="mb-8">
+              <label className="flex flex-col items-center justify-center w-full h-52 border-3 border-dashed border-slate-300 rounded-2xl cursor-pointer bg-slate-50 hover:bg-purple-50 hover:border-purple-400 transition-all duration-300">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".tiff,.tif,.zip"
+                  multiple
+                  className="hidden"
+                  onChange={handleUnifiedSelect}
+                />
+                <div className="text-center p-8">
+                  <svg className="w-16 h-16 mx-auto mb-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                  </svg>
+                  <p className="text-2xl font-semibold text-slate-700 mb-2">Drop your files here or click to upload</p>
+                  <p className="text-sm text-slate-500">Supports: TIFF files, entire folders, or ZIP files</p>
+                </div>
+              </label>
+            </div>
+
+            <div className="mb-8">
+              <div className="flex items-center gap-3 mb-3">
+                <span className="text-sm font-semibold text-slate-700">Or select an entire folder:</span>
+                <label className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-xl font-semibold hover:bg-purple-700 transition-all cursor-pointer">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                  </svg>
+                  <span>Select Folder</span>
+                  <input
+                    ref={folderInputRef}
+                    type="file"
+                    directory=""
+                    webkitdirectory=""
+                    className="hidden"
+                    onChange={handleUnifiedSelect}
+                  />
+                </label>
+              </div>
+            </div>
+
+            {errorMessage && (
+              <div className="mb-8 p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3">
+                <svg className="w-6 h-6 text-red-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <p className="text-red-700 font-medium">{errorMessage}</p>
+              </div>
+            )}
+
+            {selectedFiles.length > 0 && (
+              <div className="mb-8">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-xl font-bold text-slate-800">
+                    Selected {selectedFiles.length} file{selectedFiles.length > 1 ? 's' : ''}{sourceName && ` from "${sourceName}"`}
+                  </h3>
+                  <button
+                    onClick={reset}
+                    className="text-sm text-red-600 hover:text-red-700 font-semibold px-4 py-2 rounded-lg hover:bg-red-50 transition-all"
+                  >
+                    Clear all
+                  </button>
+                </div>
+                <div className="max-h-72 overflow-y-auto border border-slate-200 rounded-2xl bg-slate-50">
+                  {selectedFiles.map((file, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center gap-4 px-5 py-4 border-b border-slate-200 last:border-b-0 hover:bg-white transition-colors"
+                    >
+                      <div className="p-3 bg-purple-100 rounded-xl">
+                        <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                        </svg>
+                      </div>
+                      <span className="text-base text-slate-700 truncate flex-1 font-medium">{file.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {selectedFiles.length > 0 && !convertedFiles.length && (
+              <button
+                onClick={startConversion}
+                disabled={converting}
+                className={`w-full py-5 px-6 rounded-xl font-bold text-white text-xl shadow-xl transition-all duration-300 ${converting ? 'bg-slate-400 cursor-not-allowed' : 'bg-gradient-to-r from-orange-500 via-orange-600 to-red-500 hover:from-orange-600 hover:via-orange-700 hover:to-red-600 hover:shadow-3xl transform hover:-translate-y-1'}`}
+              >
+                {converting ? (
+                  <div className="flex items-center justify-center gap-4">
+                    <svg className="w-8 h-8 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    {status}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center gap-4">
+                    <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                    </svg>
+                    Convert Files
+                  </div>
+                )}
+              </button>
+            )}
+
+            {converting && (
+              <div className="mt-6">
+                <div className="w-full bg-slate-200 rounded-full h-4 overflow-hidden">
+                  <div 
+                    className="bg-gradient-to-r from-purple-500 to-purple-700 h-4 rounded-full transition-all duration-300"
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
+                <p className="text-center text-sm font-semibold text-slate-600 mt-3">{progress}% complete</p>
+              </div>
+            )}
+
+            {convertedFiles.length > 0 && (
+              <div className="mt-8 pt-8 border-t border-slate-200">
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <p className="text-2xl font-bold text-slate-800">
+                      {convertedFiles.length} file{convertedFiles.length > 1 ? 's' : ''} converted
+                    </p>
+                    <p className="text-sm text-slate-600 mt-1">{status}</p>
+                  </div>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => downloadAllAsZip()}
+                      className="flex items-center gap-2 px-5 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-xl font-semibold hover:from-purple-700 hover:to-indigo-700 transition-all shadow-lg hover:shadow-xl"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      Download ZIP
+                    </button>
+                    <button
+                      onClick={reset}
+                      className="px-5 py-3 border-2 border-slate-300 text-slate-700 rounded-xl font-semibold hover:bg-slate-50 transition-all"
+                    >
+                      Convert More
+                    </button>
+                  </div>
+                </div>
+                <div className="max-h-96 overflow-y-auto space-y-3">
+                  {convertedFiles.map((file, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center justify-between gap-4 px-5 py-4 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-2xl"
+                    >
+                      <div className="flex items-center gap-4 min-w-0 flex-1">
+                        <div className="p-3 bg-green-100 rounded-xl flex-shrink-0">
+                          <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                        <span className="text-base text-slate-700 truncate font-semibold">{file.name}</span>
+                      </div>
+                      <button
+                        onClick={() => downloadIndividual(file)}
+                        className="p-3 text-purple-600 hover:text-purple-700 hover:bg-purple-100 rounded-xl transition-all flex-shrink-0"
+                        title="Download"
+                      >
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </main>
+  )
+}
