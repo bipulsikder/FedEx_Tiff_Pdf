@@ -41,6 +41,13 @@ export default function SignUp() {
     setMessage('')
     setIsError(false)
 
+    if (!email.toLowerCase().endsWith('@fedex.com')) {
+      setIsError(true)
+      setMessage('Only @fedex.com email addresses are allowed to sign up.')
+      setLoading(false)
+      return
+    }
+
     try {
       const { error } = await supabase.auth.signInWithOtp({
         email,
