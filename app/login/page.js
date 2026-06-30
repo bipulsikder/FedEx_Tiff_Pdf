@@ -40,13 +40,6 @@ export default function Login() {
     setMessage('')
     setIsError(false)
 
-    if (!email.toLowerCase().endsWith('@fedex.com')) {
-      setIsError(true)
-      setMessage('Only @fedex.com email addresses are allowed.')
-      setLoading(false)
-      return
-    }
-
     try {
       const { data: exists, error: checkError } = await supabase
         .rpc('check_email_exists', { user_email: email })
