@@ -122,18 +122,22 @@ Open [http://localhost:3000](http://localhost:3000) to see the app!
 ## Features
 
 ### For Regular Users
-- Sign up with full name and email using magic link
-- Log in with magic link
+- Sign up with full name and email
 - Upload TIFF files, entire folders, or ZIP files
+- Error-tolerant batch conversion — processing continues even if some files fail
+- Per-file live status during conversion (converting ✓ / error ✗)
+- Partial download — download successfully converted files even when others fail
+- Failed files are flagged with error details in the results summary
 - Automatic conversion and download
 - Simple, clean interface
 
 ### For Admin (admin@fedex.com)
-- Access /admin dashboard
+- Access `/admin` dashboard
 - View total number of conversions
 - See date-wise conversion analytics
 - Track which users converted how many files
 - Graphical representations of conversion data
+- Automatic redirect to `/admin/login` if not authenticated
 
 ---
 

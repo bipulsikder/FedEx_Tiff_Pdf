@@ -9,33 +9,16 @@ export default function AdminLogin() {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [checkingAuth, setCheckingAuth] = useState(true)
-  const [loggedInUser, setLoggedInUser] = useState(null)
+  const [checking, setChecking] = useState(true)
   const router = useRouter()
 
   useEffect(() => {
-    const checkSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (session?.user && session.user.email === 'admin@fedex.com') {
-        router.push('/admin')
-        return
-      }
-      if (session?.user) {
-        setLoggedInUser(session.user.email)
-      }
-      setCheckingAuth(false)
+    const storedEmail = localStorage.getItem('userEmail')
+    if (storedEmail === 'admin@fedex.com') {
+      router.replace('/admin')
+      return
     }
-    checkSession()
-
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      if (session?.user && session.user.email === 'admin@fedex.com') {
-        router.push('/admin')
-      }
-    })
-
-    return () => {
-      authListener?.subscription?.unsubscribe()
-    }
+    setChecking(false)
   }, [])
 
   const handleLogin = async (e) => {
@@ -50,6 +33,10 @@ export default function AdminLogin() {
       })
 
       if (error) throw error
+
+      localStorage.setItem('userEmail', email)
+      localStorage.setItem('userName', 'Admin')
+      router.push('/admin')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -57,18 +44,10 @@ export default function AdminLogin() {
     }
   }
 
-  const handleSignOut = async () => {
-    await supabase.auth.signOut()
-    setLoggedInUser(null)
-  }
-
-  if (checkingAuth) {
+  if (checking) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-16 w-16 border-4 border-purple-600 border-t-transparent mx-auto mb-4"></div>
-          <p className="text-xl text-slate-700">Checking session...</p>
-        </div>
+        <div className="animate-spin rounded-full h-16 w-16 border-4 border-purple-600 border-t-transparent"></div>
       </div>
     )
   }
@@ -85,24 +64,6 @@ export default function AdminLogin() {
           <h1 className="text-3xl font-extrabold text-slate-800">Admin Login</h1>
           <p className="text-slate-500 mt-3">Sign in to access admin dashboard</p>
         </div>
-
-        {loggedInUser && (
-          <div className="mb-8 p-5 bg-yellow-50 border border-yellow-200 rounded-2xl flex items-start gap-4">
-            <svg className="w-7 h-7 flex-shrink-0 mt-0.5 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <div className="flex-1">
-              <p className="font-semibold text-yellow-800 text-lg">Logged in as <strong>{loggedInUser}</strong></p>
-              <p className="text-yellow-700 mt-1">This account doesn't have admin access.</p>
-              <button
-                onClick={handleSignOut}
-                className="mt-3 px-5 py-2 bg-yellow-200 hover:bg-yellow-300 rounded-xl font-bold text-yellow-800 transition-all"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-        )}
 
         {error && (
           <div className="mb-8 p-5 bg-red-50 border border-red-200 text-red-700 rounded-2xl flex items-start gap-4">
@@ -148,12 +109,12 @@ export default function AdminLogin() {
         </form>
 
         <div className="mt-8 text-center">
-          <button
-            onClick={() => router.push('/')}
+          <a
+            href="/"
             className="text-purple-600 font-bold hover:text-purple-700 transition-colors"
           >
             Back to Converter
-          </button>
+          </a>
         </div>
       </div>
     </div>

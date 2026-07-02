@@ -2,61 +2,94 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { useRouter } from 'next/navigation'
 
 export default function Home() {
   const [selectedFiles, setSelectedFiles] = useState([])
   const [sourceName, setSourceName] = useState('')
   const [converting, setConverting] = useState(false)
   const [convertedFiles, setConvertedFiles] = useState([])
+  const [failedFiles, setFailedFiles] = useState([])
+  const [conversionResults, setConversionResults] = useState([])
   const [status, setStatus] = useState('')
   const [progress, setProgress] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
-  const [user, setUser] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [userEmail, setUserEmail] = useState('')
+  const [userName, setUserName] = useState('')
+  const [showIdentityForm, setShowIdentityForm] = useState(true)
+  const [identityEmail, setIdentityEmail] = useState('')
+  const [identityName, setIdentityName] = useState('')
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
-  const router = useRouter()
 
   useEffect(() => {
-    // First check for existing session
-    const init = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (session?.user) {
-        setUser(session.user)
-      }
-      setLoading(false)
-    }
-    init()
-
-    // Listen for auth state changes
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      if (session?.user) {
-        setUser(session.user)
-      } else {
-        setUser(null)
-      }
-      setLoading(false)
-    })
-
-    return () => {
-      authListener?.subscription?.unsubscribe()
+    const storedEmail = localStorage.getItem('userEmail')
+    const storedName = localStorage.getItem('userName')
+    if (storedEmail && storedName) {
+      setUserEmail(storedEmail)
+      setUserName(storedName)
+      setShowIdentityForm(false)
     }
   }, [])
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-    router.push('/login')
+  const registerUser = async (email, name) => {
+    const { data: existing } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email)
+
+    if (existing && existing.length > 0) {
+      await supabase
+        .from('users')
+        .update({ full_name: name })
+        .eq('email', email)
+    } else {
+      await supabase
+        .from('users')
+        .insert({ email, full_name: name })
+    }
+  }
+
+  const [registering, setRegistering] = useState(false)
+
+  const handleIdentitySubmit = async (e) => {
+    e.preventDefault()
+    if (!identityEmail || !identityName) return
+    setRegistering(true)
+    try {
+      await registerUser(identityEmail, identityName)
+    } catch (err) {
+      console.error('User registration error:', err)
+    }
+    localStorage.setItem('userEmail', identityEmail)
+    localStorage.setItem('userName', identityName)
+    setUserEmail(identityEmail)
+    setUserName(identityName)
+    setShowIdentityForm(false)
+  }
+
+  const handleChangeUser = () => {
+    localStorage.removeItem('userEmail')
+    localStorage.removeItem('userName')
+    setUserEmail('')
+    setUserName('')
+    setIdentityEmail('')
+    setIdentityName('')
+    setShowIdentityForm(true)
   }
 
   const trackConversion = async (count) => {
-    try {
-      await supabase
-        .from('conversions')
-        .insert({ user_id: user.id, files_converted: count })
-    } catch (error) {
-      console.error('Error tracking conversion:', error)
-    }
+    const { data: existing } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', userEmail)
+
+    if (!existing || existing.length === 0) return
+
+    const { error: convError } = await supabase
+      .from('conversions')
+      .insert({ user_id: existing[0].id, files_converted: count })
+
+    if (convError) console.error('Conversion insert error:', convError)
   }
 
   const processFiles = async (files) => {
@@ -64,14 +97,21 @@ export default function Home() {
     setStatus('Starting conversion...')
     setProgress(0)
     setErrorMessage('')
+    setConvertedFiles([])
+    setFailedFiles([])
     const converted = []
+    const failed = []
+    const results = []
 
-    try {
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i]
-        setStatus(`Converting ${i + 1}/${files.length}: ${file.name}`)
-        setProgress(Math.round(((i + 1) / files.length) * 100))
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      setStatus(`Converting ${i + 1}/${files.length}: ${file.name}`)
+      setProgress(Math.round(((i + 1) / files.length) * 100))
 
+      results[i] = { name: file.name, status: 'converting' }
+      setConversionResults([...results])
+
+      try {
         const formData = new FormData()
         formData.append('file', file)
 
@@ -80,33 +120,46 @@ export default function Home() {
           body: formData,
         })
 
-        if (!res.ok) throw new Error(`Conversion failed for ${file.name}`)
+        if (!res.ok) throw new Error(res.statusText || 'Conversion failed')
 
         const blob = await res.blob()
         const url = URL.createObjectURL(blob)
         const pdfName = file.name.replace(/\.(tiff|tif)$/i, '.pdf')
 
         converted.push({ name: pdfName, url, blob })
+        results[i] = { name: file.name, status: 'success', pdfName }
+      } catch (err) {
+        failed.push({ name: file.name, error: err.message })
+        results[i] = { name: file.name, status: 'error', error: err.message }
       }
 
-      setConvertedFiles(converted)
-      setStatus('All conversions complete!')
+      setConversionResults([...results])
+      setConvertedFiles([...converted])
+      setFailedFiles([...failed])
+    }
+
+    setConverting(false)
+
+    if (converted.length > 0) {
+      setStatus(`${converted.length} of ${files.length} converted successfully`)
       setProgress(100)
-      
-      await trackConversion(files.length)
 
-      if (files.length === 1) {
-        setStatus('Downloading PDF...')
-        downloadIndividual(converted[0])
-      } else {
-        setStatus('Downloading ZIP...')
-        await downloadAllAsZip(converted)
+      try {
+        await trackConversion(converted.length)
+      } catch (trackErr) {
+        console.error('Tracking error (non-fatal):', trackErr)
       }
-    } catch (error) {
-      console.error(error)
-      setErrorMessage(`Error converting files: ${error.message}`)
-    } finally {
-      setConverting(false)
+    }
+
+    if (failed.length > 0 && converted.length === 0) {
+      setStatus('All conversions failed')
+      setErrorMessage(`${failed.length} file(s) could not be converted. Check the error details below.`)
+    } else if (failed.length > 0) {
+      setStatus(`${converted.length} of ${files.length} converted successfully`)
+    }
+
+    if (files.length === 1 && converted.length === 1) {
+      downloadIndividual(converted[0])
     }
   }
 
@@ -214,6 +267,8 @@ export default function Home() {
     setSelectedFiles([])
     setSourceName('')
     setConvertedFiles([])
+    setFailedFiles([])
+    setConversionResults([])
     setStatus('')
     setProgress(0)
     setErrorMessage('')
@@ -221,20 +276,65 @@ export default function Home() {
     if (folderInputRef.current) folderInputRef.current.value = ''
   }
 
-  if (loading) {
+  if (showIdentityForm) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-16 w-16 border-4 border-purple-600 border-t-transparent mx-auto mb-4"></div>
-          <p className="text-xl text-slate-700">Loading...</p>
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center p-4">
+        <div className="bg-white rounded-3xl shadow-xl border border-slate-200 p-8 max-w-md w-full">
+          <div className="mb-8 text-center">
+            <img 
+              src="/fedex-logo-local.png" 
+              alt="FedEx Logo" 
+              className="h-14 mx-auto mb-6" 
+            />
+            <h1 className="text-3xl font-extrabold text-slate-800">TIFF to PDF Converter</h1>
+            <p className="text-slate-500 mt-3 text-lg">Enter your details to get started</p>
+          </div>
+
+          <form onSubmit={handleIdentitySubmit} className="space-y-6">
+            <div>
+              <label className="block text-sm font-bold text-slate-700 mb-3">Full Name</label>
+              <input
+                type="text"
+                value={identityName}
+                onChange={(e) => setIdentityName(e.target.value)}
+                required
+                className="w-full px-5 py-4 rounded-2xl border-2 border-slate-200 focus:border-purple-500 focus:ring-4 focus:ring-purple-100 outline-none transition-all text-lg"
+                placeholder="John Doe"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-bold text-slate-700 mb-3">Email Address</label>
+              <input
+                type="email"
+                value={identityEmail}
+                onChange={(e) => setIdentityEmail(e.target.value)}
+                required
+                className="w-full px-5 py-4 rounded-2xl border-2 border-slate-200 focus:border-purple-500 focus:ring-4 focus:ring-purple-100 outline-none transition-all text-lg"
+                placeholder="you@example.com"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={registering}
+              className="w-full py-4 px-6 rounded-2xl font-extrabold text-white text-lg shadow-xl transition-all duration-300 bg-gradient-to-r from-orange-500 via-orange-600 to-red-500 hover:from-orange-600 hover:via-orange-700 hover:to-red-600 disabled:bg-slate-400 disabled:cursor-not-allowed"
+            >
+              {registering ? (
+                <div className="flex items-center justify-center gap-3">
+                  <svg className="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  Setting up...
+                </div>
+              ) : (
+                'Start Converting'
+              )}
+            </button>
+          </form>
         </div>
       </div>
     )
-  }
-
-  if (!user) {
-    router.push('/login')
-    return null
   }
 
   return (
@@ -254,20 +354,27 @@ export default function Home() {
               </div>
             </div>
             <div className="flex items-center gap-4">
-              {user.email === 'admin@fedex.com' && (
-                <button
-                  onClick={() => router.push('/admin')}
+              {userEmail === 'admin@fedex.com' && (
+                <a
+                  href="/admin"
                   className="px-4 py-2 bg-white/20 border border-white/30 rounded-xl font-semibold hover:bg-white/30 transition-all"
                 >
                   Admin Dashboard
-                </button>
+                </a>
               )}
-              <button
-                onClick={handleLogout}
-                className="px-4 py-2 bg-red-500 rounded-xl font-semibold hover:bg-red-600 transition-all"
-              >
-                Logout
-              </button>
+              <div className="flex items-center gap-3 px-4 py-2 bg-white/10 rounded-xl">
+                <div className="w-8 h-8 rounded-full bg-purple-500 flex items-center justify-center text-white font-bold text-sm">
+                  {userName.charAt(0).toUpperCase()}
+                </div>
+                <span className="text-sm font-medium">{userName}</span>
+                <button
+                  onClick={handleChangeUser}
+                  className="text-xs text-purple-200 hover:text-white ml-2"
+                  title="Switch user"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -361,7 +468,7 @@ export default function Home() {
               </div>
             )}
 
-            {selectedFiles.length > 0 && !convertedFiles.length && (
+            {selectedFiles.length > 0 && !convertedFiles.length && !failedFiles.length && (
               <button
                 onClick={startConversion}
                 disabled={converting}
@@ -387,36 +494,72 @@ export default function Home() {
             )}
 
             {converting && (
-              <div className="mt-6">
+              <div className="mt-6 space-y-4">
                 <div className="w-full bg-slate-200 rounded-full h-4 overflow-hidden">
                   <div 
                     className="bg-gradient-to-r from-purple-500 to-purple-700 h-4 rounded-full transition-all duration-300"
                     style={{ width: `${progress}%` }}
                   />
                 </div>
-                <p className="text-center text-sm font-semibold text-slate-600 mt-3">{progress}% complete</p>
+                <p className="text-center text-sm font-semibold text-slate-600">{progress}% complete</p>
+                <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-xl bg-slate-50 divide-y divide-slate-200">
+                  {conversionResults.map((r, idx) => (
+                    <div key={idx} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+                      {r.status === 'converting' && (
+                        <svg className="w-4 h-4 text-purple-500 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                      )}
+                      {r.status === 'success' && (
+                        <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                        </svg>
+                      )}
+                      {r.status === 'error' && (
+                        <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      )}
+                      <span className={`truncate flex-1 ${r.status === 'error' ? 'text-red-600' : r.status === 'success' ? 'text-green-700' : 'text-slate-700'}`}>
+                        {r.name}
+                      </span>
+                      {r.status === 'error' && (
+                        <span className="text-xs text-red-500 flex-shrink-0 truncate max-w-[200px]" title={r.error}>
+                          {r.error}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 
-            {convertedFiles.length > 0 && (
+            {(convertedFiles.length > 0 || failedFiles.length > 0) && (
               <div className="mt-8 pt-8 border-t border-slate-200">
                 <div className="flex items-center justify-between mb-6">
                   <div>
                     <p className="text-2xl font-bold text-slate-800">
-                      {convertedFiles.length} file{convertedFiles.length > 1 ? 's' : ''} converted
+                      {convertedFiles.length > 0
+                        ? `${convertedFiles.length} file${convertedFiles.length > 1 ? 's' : ''} converted`
+                        : 'Conversion completed'}
                     </p>
                     <p className="text-sm text-slate-600 mt-1">{status}</p>
                   </div>
                   <div className="flex gap-3">
-                    <button
-                      onClick={() => downloadAllAsZip()}
-                      className="flex items-center gap-2 px-5 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-xl font-semibold hover:from-purple-700 hover:to-indigo-700 transition-all shadow-lg hover:shadow-xl"
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                      </svg>
-                      Download ZIP
-                    </button>
+                    {convertedFiles.length > 0 && (
+                      <button
+                        onClick={() => downloadAllAsZip()}
+                        className="flex items-center gap-2 px-5 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-xl font-semibold hover:from-purple-700 hover:to-indigo-700 transition-all shadow-lg hover:shadow-xl"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                        {failedFiles.length > 0
+                          ? `Download ${convertedFiles.length} Converted`
+                          : 'Download ZIP'}
+                      </button>
+                    )}
                     <button
                       onClick={reset}
                       className="px-5 py-3 border-2 border-slate-300 text-slate-700 rounded-xl font-semibold hover:bg-slate-50 transition-all"
@@ -425,10 +568,31 @@ export default function Home() {
                     </button>
                   </div>
                 </div>
+
+                {failedFiles.length > 0 && (
+                  <div className="mb-6 p-5 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-4">
+                    <div className="p-2 bg-amber-100 rounded-xl flex-shrink-0">
+                      <svg className="w-6 h-6 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                      </svg>
+                    </div>
+                    <div>
+                      <p className="font-bold text-amber-800 text-lg">
+                        {failedFiles.length} file{failedFiles.length > 1 ? 's' : ''} could not be converted
+                      </p>
+                      <p className="text-amber-700 text-sm mt-1">
+                        {convertedFiles.length > 0
+                          ? 'The remaining files were converted successfully. You can download them below.'
+                          : 'All files failed. Check the error details below.'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="max-h-96 overflow-y-auto space-y-3">
                   {convertedFiles.map((file, idx) => (
                     <div
-                      key={idx}
+                      key={`ok-${idx}`}
                       className="flex items-center justify-between gap-4 px-5 py-4 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-2xl"
                     >
                       <div className="flex items-center gap-4 min-w-0 flex-1">
@@ -448,6 +612,22 @@ export default function Home() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                         </svg>
                       </button>
+                    </div>
+                  ))}
+                  {failedFiles.map((file, idx) => (
+                    <div
+                      key={`err-${idx}`}
+                      className="flex items-center gap-4 px-5 py-4 bg-gradient-to-r from-red-50 to-rose-50 border border-red-200 rounded-2xl"
+                    >
+                      <div className="p-3 bg-red-100 rounded-xl flex-shrink-0">
+                        <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-base text-slate-700 truncate font-semibold">{file.name}</p>
+                        <p className="text-sm text-red-600 truncate mt-0.5">{file.error}</p>
+                      </div>
                     </div>
                   ))}
                 </div>

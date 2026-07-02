@@ -2,22 +2,21 @@
 
 import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../../lib/supabase'
-import { useRouter } from 'next/navigation'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area } from 'recharts'
 
 export default function AdminDashboard() {
-  const [user, setUser] = useState(null)
+  const [authorized, setAuthorized] = useState(false)
   const [loading, setLoading] = useState(true)
   const [conversions, setConversions] = useState([])
   const [users, setUsers] = useState([])
-  const [timeFrame, setTimeFrame] = useState('7d') // 7d, 30d, 90d, all, custom
+  const [timeFrame, setTimeFrame] = useState('7d')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
-  const router = useRouter()
+  const [adminEmail, setAdminEmail] = useState('')
+  const [adminName, setAdminName] = useState('')
 
   const COLORS = ['#4F46E5', '#7C3AED', '#A855F7', '#D946EF', '#EC4899', '#F43F5E', '#F97316', '#EAB308']
 
-  // Initialize default dates for custom range
   useEffect(() => {
     const now = new Date()
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
@@ -26,41 +25,22 @@ export default function AdminDashboard() {
   }, [])
 
   useEffect(() => {
-    // First check for existing session
-    const init = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (session?.user && session.user.email === 'admin@fedex.com') {
-        setUser(session.user)
-        await fetchData()
-      } else if (session?.user) {
-        // Not admin, redirect to admin login
-        router.push('/admin/login')
-      } else {
-        // No session, redirect to admin login
-        router.push('/admin/login')
-      }
-      setLoading(false)
+    const email = localStorage.getItem('userEmail')
+    const name = localStorage.getItem('userName')
+    if (email === 'admin@fedex.com') {
+      setAdminEmail(email)
+      setAdminName(name || 'Admin')
+      setAuthorized(true)
+      fetchData()
     }
-    init()
-
-    // Listen for auth state changes
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session?.user && session.user.email === 'admin@fedex.com') {
-        setUser(session.user)
-        await fetchData()
-      } else if (session?.user) {
-        router.push('/admin/login')
-      } else {
-        setUser(null)
-        router.push('/admin/login')
-      }
-      setLoading(false)
-    })
-
-    return () => {
-      authListener?.subscription?.unsubscribe()
-    }
+    setLoading(false)
   }, [])
+
+  useEffect(() => {
+    if (!loading && !authorized) {
+      window.location.href = '/admin/login'
+    }
+  }, [loading, authorized])
 
   const fetchData = async () => {
     try {
@@ -90,9 +70,10 @@ export default function AdminDashboard() {
     }
   }
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-    router.push('/admin/login')
+  const handleLogout = () => {
+    localStorage.removeItem('userEmail')
+    localStorage.removeItem('userName')
+    window.location.href = '/'
   }
 
   const filteredConversions = useMemo(() => {
@@ -176,6 +157,8 @@ export default function AdminDashboard() {
     )
   }
 
+  if (loading || !authorized) return null
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
       {/* Header */}
@@ -194,17 +177,17 @@ export default function AdminDashboard() {
               </div>
             </div>
             <div className="flex items-center gap-4">
-              <button
-                onClick={() => router.push('/')}
+              <a
+                href="/"
                 className="px-6 py-3 bg-white/10 border border-white/20 rounded-2xl font-bold hover:bg-white/20 transition-all duration-300 backdrop-blur"
               >
                 Back to Converter
-              </button>
+              </a>
               <button
                 onClick={handleLogout}
                 className="px-6 py-3 bg-red-500/90 rounded-2xl font-bold hover:bg-red-600 transition-all duration-300 shadow-lg shadow-red-500/30"
               >
-                Logout
+                Switch User
               </button>
             </div>
           </div>
